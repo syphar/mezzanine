@@ -3,6 +3,7 @@ from future.builtins import int, open, str
 
 from hashlib import md5
 from json import loads
+from StringIO import StringIO
 import os
 try:
     from urllib.request import urlopen
@@ -13,8 +14,8 @@ except ImportError:
 from django.contrib import admin
 from django.contrib.auth import REDIRECT_FIELD_NAME
 from django.contrib.sites.models import Site
-from django.core.files import File
-from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage, get_storage_class
 from django.core.urlresolvers import reverse, resolve, NoReverseMatch
 from django.db.models import Model, get_model
 from django.template import (Context, Node, TextNode, Template,
@@ -24,6 +25,7 @@ from django.template.loader import get_template
 from django.utils import translation
 from django.utils.html import strip_tags
 from django.utils.text import capfirst
+from django.utils.encoding import force_bytes, force_text
 
 from mezzanine.conf import settings
 from mezzanine.core.fields import RichTextField
@@ -282,10 +284,12 @@ def thumbnail(image_url, width, height,
     except ImportError:
         return ""
 
-    image_url = unquote(str(image_url)).split("?")[0]
-    if image_url.startswith(settings.MEDIA_URL):
-        image_url = image_url.replace(settings.MEDIA_URL, "", 1)
-    image_dir, image_name = os.path.split(image_url)
+    thumbnail_storage = get_storage_class(settings.THUMBNAILS_STORAGE_BACKEND)()
+
+    image_path = force_text(image_url).split("?")[0]
+    if image_path.startswith(settings.MEDIA_URL):
+        image_path = image_path.replace(settings.MEDIA_URL, "", 1)
+    image_dir, image_name = os.path.split(image_path)
     image_prefix, image_ext = os.path.splitext(image_name)
     filetype = {".png": "PNG", ".gif": "GIF"}.get(image_ext, "JPEG")
     thumb_name = "%s-%sx%s" % (image_prefix, width, height)
@@ -297,20 +301,11 @@ def thumbnail(image_url, width, height,
     thumb_name = "%s%s" % (thumb_name, image_ext)
 
     thumb_dir_name = "thumbs-%s" % image_name
-    thumb_dir_path = os.path.join(settings.MEDIA_ROOT, image_dir,
-                                  settings.THUMBNAILS_DIR_NAME, thumb_dir_name)
-    if not os.path.exists(thumb_dir_path):
-        os.makedirs(thumb_dir_path)
-    thumb_path = os.path.join(thumb_dir_path, thumb_name)
-    thumb_url = "%s/%s/%s" % (settings.THUMBNAILS_DIR_NAME,
-                              quote(thumb_dir_name.encode("utf-8")),
-                              quote(thumb_name.encode("utf-8")))
-    image_url_path = os.path.dirname(image_url)
-    if image_url_path:
-        thumb_url = "%s/%s" % (image_url_path, thumb_url)
+    thumb_path = os.path.join(image_dir, settings.THUMBNAILS_DIR_NAME,
+                                  thumb_dir_name, thumb_name)
 
     try:
-        thumb_exists = os.path.exists(thumb_path)
+        thumb_exists = thumbnail_storage.exists(thumb_path)
     except UnicodeEncodeError:
         # The image that was saved to a filesystem with utf-8 support,
         # but somehow the locale has changed and the filesystem does not
@@ -319,17 +314,17 @@ def thumbnail(image_url, width, height,
         raise FileSystemEncodingChanged()
     if thumb_exists:
         # Thumbnail exists, don't generate it.
-        return thumb_url
-    elif not default_storage.exists(image_url):
+        return thumbnail_storage.url(thumb_path)
+    elif not default_storage.exists(image_path):
         # Requested image does not exist, just return its URL.
-        return image_url
+        return default_storage.url(image_path)
 
     with default_storage.open(image_path) as f:
         try:
             image = Image.open(f)
         except:
             # Invalid image format
-            return image_url
+            return default_storage.url(image_path)
 
     image_info = image.info
     to_width = int(width)
@@ -339,7 +334,7 @@ def thumbnail(image_url, width, height,
 
     # If already right size, don't do anything.
     if to_width == from_width and to_height == from_height:
-        return image_url
+        return default_storage.url(image_path)
     # Set dimensions.
     if to_width == 0:
         to_width = from_width * to_height // from_height
@@ -372,13 +367,18 @@ def thumbnail(image_url, width, height,
     to_size = (to_width, to_height)
     to_pos = (left, top)
     try:
+        buffer = StringIO()
         image = ImageOps.fit(image, to_size, Image.ANTIALIAS, 0, to_pos)
-        image = image.save(thumb_path, filetype, quality=quality, **image_info)
+        image.save(buffer, filetype, quality=quality, **image_info)
+        content = ContentFile(buffer.getvalue())
+
+        thumbnail_storage.save(thumb_path, content)
+
         # Push a remote copy of the thumbnail if MEDIA_URL is
         # absolute.
         if "://" in settings.MEDIA_URL:
-            with open(thumb_path, "rb") as f:
-                default_storage.save(thumb_url, File(f))
+            default_storage.save(thumb_path, content)
+
     except Exception:
         # If an error occurred, a corrupted image may have been saved,
         # so remove it, otherwise the check for it existing will just
@@ -387,8 +387,8 @@ def thumbnail(image_url, width, height,
             os.remove(thumb_path)
         except Exception:
             pass
-        return image_url
-    return thumb_url
+        return default_storage.url(image_path)
+    return thumbnail_storage.url(thumb_path)
 
 
 @register.inclusion_tag("includes/editable_loader.html", takes_context=True)

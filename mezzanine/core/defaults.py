@@ -534,6 +534,13 @@ register_setting(
 )
 
 register_setting(
+    name="THUMBNAILS_STORAGE_BACKEND",
+    description=_("Storage backend to use to store thumbnails."),
+    editable=False,
+    default="mezzanine.core.storage_backends.ThumbnailStorage",
+)
+
+register_setting(
     name="TINYMCE_SETUP_JS",
     description=_("URL for the JavaScript file (relative to ``STATIC_URL``) "
         "that handles configuring TinyMCE when the default "
